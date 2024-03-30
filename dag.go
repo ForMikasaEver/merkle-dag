@@ -5,11 +5,6 @@ import (
 	"hash"
 )
 
-const (
-	K          = 1 << 10
-	BLOCK_SIZE = 256 * K
-)
-
 type Link struct {
 	Name string
 	Hash []byte
@@ -22,66 +17,74 @@ type Object struct {
 }
 
 func Add(store KVStore, node Node, h hash.Hash) []byte {
-	// TODO 将分片写入到KVStore中，并返回Merkle Root
 	switch node.Type() {
 	case FILE:
-		StoreFile(store, node.(File), h)
-		break
+		file := node.(File)
+		obj_value, _ := json.Marshal(StoreFile(store, file, h))
+		hash := CalHash1(obj_value, h)
+		return hash
 	case DIR:
-		StoreDir(store, node.(Dir), h)
-		break
+		dir := node.(Dir)
+		obj_value, _ := json.Marshal(StoreDir(store, dir, h))
+		hash := CalHash1(obj_value, h)
+		return hash
 	}
 	return nil
 }
 
-func StoreFile(store KVStore, node File, h hash.Hash) []byte {
-	var t []byte
-
-	if node.Size() > BLOCK_SIZE {
-		t = []byte("list")
-	} else {
-		t = []byte("blob")
-	}
-
-	_ = t // 使用 t 变量，以避免 "unused" 错误
-
-	data := node.Bytes()
+func CalHash1(data []byte, h hash.Hash) []byte {
 	h.Reset()
-	h.Write(data)
-	hash := h.Sum(nil)
-
-	store.Put(hash, data)
-
+	hash := h.Sum(data)
+	h.Reset()
 	return hash
 }
 
-func StoreDir(store KVStore, dir Dir, h hash.Hash) []byte {
-	tree := Object{
-		Links: make([]Link, 0),
-		Data:  nil,
-	}
+func StoreFile(store KVStore, file File, h hash.Hash) *Object {
+	data := file.Bytes()
+	blob := Object{Data: data, Links: nil}
+	obj_value, _ := json.Marshal(blob)
+	hash := CalHash1(obj_value, h)
+	store.Put(hash, data)
+	return &blob
+}
 
+func StoreDir(store KVStore, dir Dir, h hash.Hash) *Object {
 	it := dir.It()
-
+	treeObject := &Object{}
 	for it.Next() {
-		node := it.Node()
-
-		var hash []byte
-		if node.Type() == FILE {
-			hash = StoreFile(store, node.(File), h)
-		} else if node.Type() == DIR {
-			hash = StoreDir(store, node.(Dir), h)
+		n := it.Node()
+		switch n.Type() {
+		case FILE:
+			file := n.(File)
+			tmp := StoreFile(store, file, h)
+			obj_value, _ := json.Marshal(tmp)
+			hash := CalHash1(obj_value, h)
+			treeObject.Links = append(treeObject.Links, Link{
+				Hash: hash,
+				Size: int(file.Size()),
+				Name: file.Name(),
+			})
+			typeName := "link"
+			if tmp.Links == nil {
+				typeName = "blob"
+			}
+			treeObject.Data = append(treeObject.Data, []byte(typeName)...)
+		case DIR:
+			dir := n.(Dir)
+			obj_value, _ := json.Marshal(StoreDir(store, dir, h)) // Recursion
+			hash := CalHash1(obj_value, h)
+			treeObject.Links = append(treeObject.Links, Link{
+				Hash: hash,
+				Size: int(dir.Size()),
+				Name: dir.Name(),
+			})
+			typeName := "tree"
+			treeObject.Data = append(treeObject.Data, []byte(typeName)...)
 		}
-
-		link := Link{Name: node.Name(), Hash: hash, Size: int(node.Size())}
-		tree.Links = append(tree.Links, link)
 	}
+	obj_value, _ := json.Marshal(treeObject)
+	hash := CalHash1(obj_value, h)
+	store.Put(hash, obj_value)
 
-	treeData, _ := json.Marshal(tree)
-	h.Reset()
-	h.Write(treeData)
-	treeHash := h.Sum(nil)
-	store.Put(treeHash, treeData)
-
-	return treeHash
+	return treeObject
 }
